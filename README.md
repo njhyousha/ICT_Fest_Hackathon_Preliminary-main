@@ -1,162 +1,106 @@
 # CoWork — Coworking Space Booking API
 
-CoWork is a REST API for managing bookable rooms inside a coworking space across
-multiple tenant organizations. Each organization has its own rooms, staff
-(admins), and members. Members book rooms for time slots; admins manage rooms and
-pull reports.
+A production-style multi-tenant REST API for managing bookable rooms inside a coworking space. Built for the **IUT ICT Fest Hackathon (Preliminary Round)**, this project implements a fully-specified booking system with strict business rules around concurrency, refunds, quotas, and multi-tenant data isolation.
 
-## Stack
+> Grading was black-box — every rule below had to hold under real concurrent load, not just on the happy path.
 
-- Python 3.11, FastAPI, SQLAlchemy, SQLite (single file, no external DB service)
-- JWT auth (access + refresh tokens), HS256, secret from the `JWT_SECRET` env var
-- One container, served on **port 8000**
+---
 
-## Setup
+## ✨ Highlights
+
+- **Multi-tenant architecture** — every organization's rooms, staff, and bookings are fully isolated; cross-org access returns `404` instead of leaking existence
+- **Concurrency-safe booking engine** — no double-booking, no quota bypass, and unique reference codes even under simultaneous requests
+- **JWT auth system** — access + refresh tokens (HS256), single-use refresh token rotation, and immediate token invalidation on logout
+- **Automated refund calculator** — tiered cancellation policy (100% / 50% / 0%) with precise half-cent rounding
+- **Rate limiting** — rolling 60-second window per user on booking creation
+- **Live admin reporting** — per-room usage reports, availability, and stats computed on demand, always consistent with underlying data
+- **Dockerized** — one command (`docker compose up --build`) spins up the full stack with zero manual DB setup
+
+---
+
+## 🛠 Tech Stack
+
+| Layer | Technology |
+|---|---|
+| Language | Python 3.11 |
+| Framework | FastAPI |
+| ORM / DB | SQLAlchemy + SQLite |
+| Auth | JWT (HS256), access + refresh tokens |
+| Testing | Pytest |
+| Deployment | Docker / Docker Compose |
+
+---
+
+## 🚀 Getting Started
 
 ```bash
 docker compose up --build
 ```
 
-The database schema is created automatically on first startup — no manual
-provisioning or seed scripts. The API listens on `http://localhost:8000`.
+The API will be live at `http://localhost:8000`. No manual migrations or seeding needed — schema is created automatically on first run.
 
-To run the smoke test locally:
+### Running Tests
 
 ```bash
 pip install -r requirements.txt
 pytest
 ```
 
-## Business rules
+---
 
-1. **Datetimes.** All API datetimes are ISO 8601. Input datetimes carrying a UTC
-   offset are converted to UTC before storage or comparison; naive input is
-   treated as UTC. All response datetimes are UTC with an explicit UTC designator
-   (`Z` or `+00:00`).
-2. **Booking price.** `price_cents = hourly_rate_cents × duration_hours`. Duration
-   must be a whole number of hours, minimum 1, maximum 8. `end_time` must be
-   strictly after `start_time`. `start_time` must be strictly in the future at
-   request time — no grace window of any size.
-3. **No double-booking.** Two `confirmed` bookings for the same room overlap iff
-   `existing.start_time < new.end_time AND new.start_time < existing.end_time`.
-   Back-to-back bookings (one ending exactly when the other starts) are allowed.
-   Conflict → `409 ROOM_CONFLICT`. Holds under concurrent requests.
-4. **Booking quota.** A member may hold at most 3 `confirmed` bookings with
-   `start_time` in the window `(now, now + 24h]`, across all rooms in their org.
-   Violation → `409 QUOTA_EXCEEDED`. Holds under concurrent requests.
-5. **Rate limit.** `POST /bookings` is limited to 20 requests per rolling 60
-   seconds per user (all requests count, successful or not). Excess →
-   `429 RATE_LIMITED`. Holds under concurrent requests.
-6. **Cancellation refund policy.** Only the booking's owner or an admin of the
-   same org may cancel. Notice = `start_time − cancellation_time`:
-   - notice ≥ 48 hours → 100% refund
-   - 24 hours ≤ notice < 48 hours → 50% refund
-   - notice < 24 hours → 0% refund
+## 📐 Business Rules Implemented
 
-   Refund amount = percentage of `price_cents`, rounded to the nearest cent with
-   half-cents rounding up (e.g. 50% of 1001 = 501). Cancelling an
-   already-cancelled booking → `409 ALREADY_CANCELLED`. A cancelled booking has
-   exactly one RefundLog entry, and the amount returned by the cancel response
-   equals the amount stored in the RefundLog. Holds under concurrent cancel
-   requests for the same booking.
-7. **Reference codes.** Every booking's `reference_code` is unique, including
-   under concurrent creation.
-8. **Auth.** Tokens are JWTs (HS256) with claims `sub` (user id, string), `org`
-   (org id), `role`, `jti` (unique per token), `iat`, `exp`, `type`
-   (`access` | `refresh`). Access tokens: `exp − iat` = exactly 900 seconds.
-   Refresh tokens: 7 days. Logout immediately invalidates the presented access
-   token for all further use (subsequent use → `401`). Refresh tokens are
-   single-use: `POST /auth/refresh` returns a new access **and** refresh token and
-   invalidates the presented refresh token (reuse → `401`).
-9. **Multi-tenancy.** A user (including admins) may only ever read or act on data
-   (rooms, bookings, reports, exports, availability, stats) belonging to their own
-   organization, on every code path. Cross-org resource IDs behave as
-   non-existent → `404`.
-10. **Booking visibility.** Members may read and cancel only their own bookings
-    (another member's booking id → `404 BOOKING_NOT_FOUND`). Admins may read and
-    cancel any booking in their org.
-11. **Pagination & ordering.** `GET /bookings` takes `page` (int ≥ 1, default 1)
-    and `limit` (int 1–100, default 10). Items are the caller's own bookings
-    sorted by ascending `start_time` (ties by ascending `id`). Page N with limit L
-    returns items `[(N−1)·L, N·L)` of that ordering; sequential pages never skip
-    or repeat items. Response includes `total`.
-12. **Usage report.** `GET /admin/usage-report?from=YYYY-MM-DD&to=YYYY-MM-DD`
-    returns, per room in the caller's org (including rooms with zero bookings),
-    the count of `confirmed` bookings with `start_time` on a date in `[from, to]`
-    (UTC, inclusive) and their summed `price_cents`. Cancelled bookings are
-    excluded. The report reflects the current state immediately.
-13. **Availability.** `GET /rooms/{id}/availability?date=YYYY-MM-DD` returns the
-    room's `confirmed` bookings starting on that UTC date as busy intervals,
-    sorted ascending. Reflects the current state immediately.
-14. **Room stats.** `GET /rooms/{id}/stats` returns the room's current count of
-    `confirmed` bookings and their summed `price_cents` (cancellation decrements
-    both). Always equals the values derivable from the bookings themselves.
-15. **Registration.** `POST /auth/register` with an unknown `org_name` creates the
-    org and the user as `admin`; with a known `org_name` it joins the caller as
-    `member`. A duplicate username within the org → `409 USERNAME_TAKEN`.
-16. **Liveness.** The service responds to all endpoints at all times; no
-    combination of concurrent valid requests may hang the service.
+- **Booking pricing:** `price_cents = hourly_rate_cents × duration_hours` (1–8 whole hours, must start in the future)
+- **No double-booking:** interval-overlap check per room, safe under concurrent writes
+- **Booking quota:** max 3 confirmed bookings per member within any rolling 24-hour window
+- **Rate limiting:** 20 requests / 60 seconds per user on `POST /bookings`
+- **Refund policy:** 100% (≥48h notice) / 50% (24–48h) / 0% (<24h), rounded to the nearest cent
+- **Pagination:** stable, gap-free ordering by `start_time`, ties broken by `id`
 
-## API contract
+---
 
-### Endpoints
+## 📡 API Overview
 
-| Method | Path | Auth | Success | Description |
-|---|---|---|---|---|
-| POST | `/auth/register` | No | 201 | Register org admin or join org as member |
-| POST | `/auth/login` | No | 200 | Returns access + refresh token |
-| POST | `/auth/refresh` | No (refresh token in body) | 200 | Rotates tokens |
-| POST | `/auth/logout` | Yes | 200 | Invalidates presented access token |
-| GET | `/rooms` | Yes | 200 | List rooms in caller's org |
-| POST | `/rooms` | Yes (admin) | 201 | Create a room |
-| GET | `/rooms/{id}/availability` | Yes | 200 | Busy intervals for a date |
-| GET | `/rooms/{id}/stats` | Yes | 200 | Live confirmed-booking count & revenue |
-| POST | `/bookings` | Yes | 201 | Create a booking |
-| GET | `/bookings` | Yes | 200 | Caller's bookings, paginated |
-| GET | `/bookings/{id}` | Yes | 200 | Single booking incl. refunds |
-| POST | `/bookings/{id}/cancel` | Yes | 200 | Cancel + refund calculation |
-| GET | `/admin/usage-report` | Yes (admin) | 200 | Per-room usage/revenue for range |
-| GET | `/admin/export` | Yes (admin) | 200 | Bookings CSV; `room_id`, `include_all` |
-| GET | `/health` | No | 200 | `{"status": "ok"}` |
+| Method | Path | Description |
+|---|---|---|
+| POST | `/auth/register` | Register org admin or join as member |
+| POST | `/auth/login` | Get access + refresh tokens |
+| POST | `/auth/refresh` | Rotate tokens |
+| POST | `/auth/logout` | Invalidate current access token |
+| GET / POST | `/rooms` | List / create rooms |
+| GET | `/rooms/{id}/availability` | Busy time slots for a date |
+| GET | `/rooms/{id}/stats` | Live booking count & revenue |
+| GET / POST | `/bookings` | List / create bookings |
+| POST | `/bookings/{id}/cancel` | Cancel with refund calculation |
+| GET | `/admin/usage-report` | Org-wide revenue report |
+| GET | `/admin/export` | Bookings as CSV |
+| GET | `/health` | Health check |
 
-### Request/response schemas (exact field names)
+Full request/response schemas and error codes are documented in the API contract used for grading.
 
-- `POST /auth/register` body `{org_name, username, password}` →
-  `{user_id, org_id, username, role}`
-- `POST /auth/login` body `{org_name, username, password}` →
-  `{access_token, refresh_token, token_type: "bearer"}`; bad credentials →
-  `401 INVALID_CREDENTIALS`
-- `POST /auth/refresh` body `{refresh_token}` → same shape as login
-- Room: `{id, org_id, name, capacity, hourly_rate_cents}`;
-  `POST /rooms` body `{name, capacity, hourly_rate_cents}`
-- Availability: `{room_id, date, busy: [{start_time, end_time}, …]}`
-- Stats: `{room_id, total_confirmed_bookings, total_revenue_cents}`
-- `POST /bookings` body `{room_id, start_time, end_time}` → Booking:
-  `{id, reference_code, room_id, user_id, start_time, end_time, status,
-  price_cents, created_at}`
-- `GET /bookings` → `{items: [Booking, …], page, limit, total}`
-- `GET /bookings/{id}` → Booking plus
-  `refunds: [{amount_cents, status, processed_at}, …]`
-- `POST /bookings/{id}/cancel` →
-  `{id, status: "cancelled", refund_percent, refund_amount_cents}`
-- Usage report → `{from, to, rooms: [{room_id, room_name, confirmed_bookings,
-  revenue_cents}, …]}`
-- Export CSV header (exact):
-  `id,reference_code,room_id,user_id,start_time,end_time,status,price_cents`
+---
 
-### Errors
+## 📂 Project Structure
 
-Application errors return JSON `{"detail": <string>, "code": <CODE>}` with codes:
-`USERNAME_TAKEN` (409), `INVALID_CREDENTIALS` (401), `ROOM_CONFLICT` (409),
-`QUOTA_EXCEEDED` (409), `RATE_LIMITED` (429), `ALREADY_CANCELLED` (409),
-`BOOKING_NOT_FOUND` (404), `ROOM_NOT_FOUND` (404), `FORBIDDEN` (403),
-`INVALID_BOOKING_WINDOW` (400 — past start, non-whole/out-of-range duration, or
-`end_time ≤ start_time`). Missing/invalid/expired/blacklisted tokens → 401.
-Framework validation errors (422) use FastAPI's default shape.
+```
+app/
+├── routers/       # API route handlers (auth, bookings, rooms, admin, health)
+├── services/       # Business logic (refunds, rate limiting, notifications, stats...)
+├── models.py        # SQLAlchemy models
+├── schemas.py        # Pydantic request/response schemas
+├── auth.py          # JWT auth logic
+├── database.py        # DB session/engine setup
+├── config.py         # App configuration
+├── cache.py          # Caching layer
+├── errors.py          # Custom error handling
+└── main.py           # FastAPI app entrypoint
+tests/
+├── test_smoke.py       # Smoke tests
+└── test_bug_hunt.py      # Edge-case & bug-hunt tests
+```
 
-## Grading
+---
 
-**Your fixes must preserve this contract exactly** (paths, status codes, error
-codes, JSON field names, JWT claims). Grading is **black-box**: the grader builds
-the container and asserts behavior against the business rules and API contract
-above by talking to the API only.
+## 🏆 About This Project
+
+Built as part of the **IUT ICT Fest Hackathon** preliminary round, where the challenge was to debug and harden an existing FastAPI codebase against a strict, fully-specified business contract — with grading done entirely through black-box API testing against concurrent, adversarial test cases.
