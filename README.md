@@ -84,19 +84,19 @@ Full request/response schemas and error codes are documented in the API contract
 
 ```
 app/
-├── routers/       # API route handlers (auth, bookings, rooms, admin, health)
+├── routers/        # API route handlers (auth, bookings, rooms, admin, health)
 ├── services/       # Business logic (refunds, rate limiting, notifications, stats...)
-├── models.py        # SQLAlchemy models
-├── schemas.py        # Pydantic request/response schemas
-├── auth.py          # JWT auth logic
-├── database.py        # DB session/engine setup
-├── config.py         # App configuration
-├── cache.py          # Caching layer
-├── errors.py          # Custom error handling
-└── main.py           # FastAPI app entrypoint
+├── models.py       # SQLAlchemy models
+├── schemas.py      # Pydantic request/response schemas
+├── auth.py         # JWT auth logic
+├── database.py     # DB session/engine setup
+├── config.py       # App configuration
+├── cache.py        # Caching layer
+├── errors.py       # Custom error handling
+└── main.py         # FastAPI app entrypoint
 tests/
 ├── test_smoke.py       # Smoke tests
-└── test_bug_hunt.py      # Edge-case & bug-hunt tests
+└── test_bug_hunt.py    # Edge-case & bug-hunt tests
 ```
 
 ---
